@@ -112,7 +112,7 @@ class TelegramLoggerSystem {
     // NEW: Build cache of chat folders
     async buildFolderCache() {
         try {
-            console.log('📁 Building folder cache...');
+            console.log('🔍 Building folder cache...');
 
             // Get all dialogs (chats)
             const dialogs = await this.client.getDialogs({ limit: 500 });
@@ -141,12 +141,12 @@ class TelegramLoggerSystem {
                     }
                 });
 
-                console.log(`📁 Cached ${this.folderCache.size} folder assignments`);
-                console.log(`📁 Excluded folders: ${EXCLUDED_FOLDERS.join(', ')}`);
+                console.log(`🔍 Cached ${this.folderCache.size} folder assignments`);
+                console.log(`🔍 Excluded folders: ${EXCLUDED_FOLDERS.join(', ')}`);
 
             } catch (folderError) {
                 console.warn('⚠️ Could not get folder information:', folderError.message);
-                console.log('📁 Folder filtering will be disabled - consider using allowlist or keyword filtering instead');
+                console.log('🔍 Folder filtering will be disabled - consider using allowlist or keyword filtering instead');
 
                 // Fall back to keyword-based filtering suggestions
                 this.suggestKeywordFiltering(dialogs);
@@ -154,7 +154,7 @@ class TelegramLoggerSystem {
 
         } catch (error) {
             console.warn('⚠️ Could not build folder cache:', error.message);
-            console.log('📁 Folder filtering will be disabled');
+            console.log('🔍 Folder filtering will be disabled');
         }
     }
 
@@ -390,9 +390,18 @@ class TelegramLoggerSystem {
                 // Skip if no text content
                 if (!message.text) return;
 
-                // Get chat and sender info
+                // Get chat and sender info with error handling
                 const chat = await message.getChat();
+                if (!chat) {
+                    console.log('⚠️  Chat info not available yet, skipping message...');
+                    return;
+                }
+
                 const sender = await message.getSender();
+                if (!sender) {
+                    console.log('⚠️  Sender info not available yet, skipping message...');
+                    return;
+                }
 
                 // NEW: Apply filtering based on current mode
                 const shouldFilter = await this.shouldFilterChat(chat.id, chat, sender);
@@ -828,7 +837,7 @@ async function main() {
 
     } else if (command === 'logs') {
         // Show recent log files
-        console.log('📝 Recent log files:');
+        console.log('📁 Recent log files:');
         try {
             const files = await fs.readdir('./logs');
             const logFiles = files.filter(f => f.startsWith('telegram-log-'));
