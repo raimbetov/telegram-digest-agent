@@ -119,3 +119,6 @@ node_modules/
 .*.swp
 .*.swo
 .*.tmp
+
+# Output files
+weekly-digest-*.md

@@ -14,7 +14,7 @@ const PHONE_NUMBER = process.env.PHONE_NUMBER;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 
-// NEW FILTERING OPTIONS
+// FILTERING OPTIONS
 const FILTER_MODE = process.env.FILTER_MODE || 'smart'; // 'smart', 'allowlist', 'exclude_folders', 'exclude_keywords', 'no_channels', 'super_strict'
 const ALLOWED_CHAT_IDS = process.env.ALLOWED_CHAT_IDS ?
     process.env.ALLOWED_CHAT_IDS.split(',').map(id => id.trim()) : [];
@@ -22,7 +22,6 @@ const EXCLUDED_FOLDERS = process.env.EXCLUDED_FOLDERS ?
     process.env.EXCLUDED_FOLDERS.split(',').map(folder => folder.trim().toLowerCase()) : [];
 const EXCLUDED_KEYWORDS = process.env.EXCLUDED_KEYWORDS ?
     process.env.EXCLUDED_KEYWORDS.split(',').map(keyword => keyword.trim().toLowerCase()) : [];
-// Additional option: block all channels when using keyword filtering
 const BLOCK_ALL_CHANNELS = process.env.BLOCK_ALL_CHANNELS === 'true';
 
 class TelegramLoggerSystem {
@@ -31,7 +30,13 @@ class TelegramLoggerSystem {
         this.isRunning = false;
         this.logDir = './logs';
         this.currentLogFile = this.getLogFileName();
-        this.folderCache = new Map(); // Cache chat folder assignments
+        this.folderCache = new Map();
+        this.connectionStabilized = false;
+        this.chatCache = new Map();
+        this.senderCache = new Map();
+        this.me = null;
+        this.processedMessages = new Set();
+        this.lastProcessTime = 0;
     }
 
     getLogFileName() {
@@ -47,11 +52,141 @@ class TelegramLoggerSystem {
         }
     }
 
+    // Retry mechanism for API calls
+    async retryApiCall(apiCall, maxRetries = 3, delay = 1000) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const result = await apiCall();
+                return result;
+            } catch (error) {
+                if (attempt === maxRetries) {
+                    throw error;
+                }
+                console.log(`⏳ API call failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 1.5;
+            }
+        }
+    }
+
+    // Get chat info with caching and retry
+    async getChatInfo(message) {
+        const chatId = message.chatId || message.peerId?.channelId || message.peerId?.chatId || message.peerId?.userId;
+        if (!chatId) {
+            console.log('⚠️  No chat ID found in message');
+            return null;
+        }
+
+        const chatKey = chatId.toString();
+
+        if (this.chatCache.has(chatKey)) {
+            return this.chatCache.get(chatKey);
+        }
+
+        try {
+            const chat = await this.retryApiCall(() => message.getChat());
+            if (chat) {
+                this.chatCache.set(chatKey, chat);
+                return chat;
+            }
+        } catch (error) {
+            console.log(`⚠️  Failed to get chat info after retries: ${error.message}`);
+        }
+
+        return null;
+    }
+
+    // Get sender info with proper channel handling
+    async getSenderInfo(message) {
+        // FIXED: Handle channel messages first
+        if (message.peerId?.className === 'PeerChannel') {
+            const channelId = message.peerId.channelId.toString();
+
+            // Return cached channel info or create synthetic sender
+            if (this.senderCache.has(`channel_${channelId}`)) {
+                return this.senderCache.get(`channel_${channelId}`);
+            }
+
+            // For channels, try to get the channel info as sender
+            try {
+                const chat = await this.getChatInfo(message);
+                if (chat) {
+                    const channelSender = {
+                        id: chat.id,
+                        firstName: chat.title || 'Channel',
+                        lastName: '',
+                        username: chat.username || `channel_${channelId}`,
+                        isChannel: true
+                    };
+                    this.senderCache.set(`channel_${channelId}`, channelSender);
+                    return channelSender;
+                }
+            } catch (error) {
+                console.log(`⚠️  Could not get channel info: ${error.message}`);
+            }
+
+            // Fallback synthetic channel sender
+            const fallbackSender = {
+                id: channelId,
+                firstName: 'Channel',
+                lastName: channelId,
+                username: `channel_${channelId}`,
+                isChannel: true
+            };
+            this.senderCache.set(`channel_${channelId}`, fallbackSender);
+            return fallbackSender;
+        }
+
+        // Handle regular messages (DMs, groups)
+        const senderId = message.senderId || message.fromId?.userId || message.peerId?.userId;
+
+        if (!senderId) {
+            console.log('⚠️  No sender ID found in message');
+            return null;
+        }
+
+        const senderKey = senderId.toString();
+
+        if (this.senderCache.has(senderKey)) {
+            return this.senderCache.get(senderKey);
+        }
+
+        try {
+            const sender = await this.retryApiCall(() => message.getSender());
+            if (sender) {
+                this.senderCache.set(senderKey, sender);
+                return sender;
+            }
+        } catch (error) {
+            console.log(`⚠️  Failed to get sender info after retries: ${error.message}`);
+        }
+
+        return null;
+    }
+
+    // Get our own user info with caching
+    async getMyInfo() {
+        if (this.me) {
+            return this.me;
+        }
+
+        try {
+            this.me = await this.retryApiCall(() => this.client.getMe());
+            return this.me;
+        } catch (error) {
+            console.log(`⚠️  Failed to get own user info: ${error.message}`);
+            return null;
+        }
+    }
+
     async initialize() {
         const session = new StringSession(SESSION_STRING);
         this.client = new TelegramClient(session, API_ID, API_HASH, {
             connectionRetries: 5,
-            retryDelay: 1000
+            retryDelay: 1000,
+            autoReconnect: true,
+            maxConcurrentDownloads: 1,
+            floodSleepThreshold: 60
         });
 
         console.log('🔄 Connecting to Telegram...');
@@ -85,7 +220,18 @@ class TelegramLoggerSystem {
             onError: (err) => console.error('Auth error:', err),
         });
 
-        // Save session for future use
+        console.log('⏳ Waiting for connection to stabilize...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        try {
+            this.me = await this.retryApiCall(() => this.client.getMe());
+            console.log(`👤 Connected as: ${this.me.firstName} ${this.me.lastName || ''} (@${this.me.username || 'no_username'})`);
+            this.connectionStabilized = true;
+        } catch (error) {
+            console.error('❌ Failed to verify connection:', error);
+            throw new Error('Connection verification failed');
+        }
+
         if (!SESSION_STRING) {
             console.log('\n🔑 Add this to your .env file:');
             console.log('TELEGRAM_SESSION=' + this.client.session.save());
@@ -94,7 +240,6 @@ class TelegramLoggerSystem {
 
         console.log('✅ Connected to Telegram successfully!');
 
-        // Initialize folder cache if using folder filtering
         if (FILTER_MODE === 'exclude_folders' && EXCLUDED_FOLDERS.length > 0) {
             await this.buildFolderCache();
         } else if (FILTER_MODE === 'exclude_keywords' && (EXCLUDED_KEYWORDS.length > 0 || BLOCK_ALL_CHANNELS)) {
@@ -109,21 +254,17 @@ class TelegramLoggerSystem {
         }
     }
 
-    // NEW: Build cache of chat folders
     async buildFolderCache() {
         try {
             console.log('🔍 Building folder cache...');
 
-            // Get all dialogs (chats)
             const dialogs = await this.client.getDialogs({ limit: 500 });
 
-            // Try to get folder information
             try {
                 const folders = await this.client.invoke({
                     _: 'messages.getDialogFilters'
                 });
 
-                // Map folder IDs to names
                 const folderMap = new Map();
                 if (folders && folders.filters) {
                     folders.filters.forEach(filter => {
@@ -133,7 +274,6 @@ class TelegramLoggerSystem {
                     });
                 }
 
-                // Cache each chat's folder assignment
                 dialogs.forEach(dialog => {
                     if (dialog.folderId !== undefined) {
                         const folderName = folderMap.get(dialog.folderId) || 'unknown';
@@ -141,24 +281,21 @@ class TelegramLoggerSystem {
                     }
                 });
 
-                console.log(`🔍 Cached ${this.folderCache.size} folder assignments`);
-                console.log(`🔍 Excluded folders: ${EXCLUDED_FOLDERS.join(', ')}`);
+                console.log(`📁 Cached ${this.folderCache.size} folder assignments`);
+                console.log(`📁 Excluded folders: ${EXCLUDED_FOLDERS.join(', ')}`);
 
             } catch (folderError) {
                 console.warn('⚠️ Could not get folder information:', folderError.message);
-                console.log('🔍 Folder filtering will be disabled - consider using allowlist or keyword filtering instead');
-
-                // Fall back to keyword-based filtering suggestions
+                console.log('📁 Folder filtering will be disabled - consider using allowlist or keyword filtering instead');
                 this.suggestKeywordFiltering(dialogs);
             }
 
         } catch (error) {
             console.warn('⚠️ Could not build folder cache:', error.message);
-            console.log('🔍 Folder filtering will be disabled');
+            console.log('📁 Folder filtering will be disabled');
         }
     }
 
-    // NEW: Suggest keyword-based filtering when folders don't work
     suggestKeywordFiltering(dialogs) {
         const cryptoKeywords = ['binance', 'crypto', 'bitcoin', 'solana', 'pump', 'trend', 'trading'];
         const cryptoChats = [];
@@ -188,62 +325,53 @@ class TelegramLoggerSystem {
         }
     }
 
-    // NEW: Check if chat should be filtered based on current mode
+    // FIXED: Early channel filtering
+    shouldSkipMessage(message) {
+        // Skip channel messages in super_strict and no_channels modes
+        if (message.peerId?.className === 'PeerChannel') {
+            if (FILTER_MODE === 'super_strict' || FILTER_MODE === 'no_channels') {
+                return true;
+            }
+
+            if (BLOCK_ALL_CHANNELS) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     async shouldFilterChat(chatId, chat, sender) {
         const chatIdStr = chatId.toString();
 
         switch (FILTER_MODE) {
             case 'allowlist':
-                // Only log chats in the allowed list
                 if (ALLOWED_CHAT_IDS.length === 0) {
                     console.warn('⚠️ ALLOWLIST mode enabled but no ALLOWED_CHAT_IDS specified!');
-                    return false; // Don't filter if no allowlist specified
+                    return false;
                 }
                 return !ALLOWED_CHAT_IDS.includes(chatIdStr);
 
             case 'exclude_folders':
-                // Exclude chats from specified folders
                 if (EXCLUDED_FOLDERS.length === 0) {
-                    return false; // Don't filter if no folders specified
+                    return false;
                 }
 
                 const chatFolder = this.folderCache.get(chatIdStr);
                 if (chatFolder && EXCLUDED_FOLDERS.includes(chatFolder)) {
-                    return true; // Filter out (exclude) this chat
+                    return true;
                 }
                 return false;
 
             case 'exclude_keywords':
-                // NEW: Exclude chats based on title keywords
                 if (EXCLUDED_KEYWORDS.length === 0 && !BLOCK_ALL_CHANNELS) {
-                    return false; // Don't filter if no keywords specified and not blocking channels
+                    return false;
                 }
 
-                // First check if we should block all channels
                 if (BLOCK_ALL_CHANNELS && chat.broadcast) {
-                    return true; // Filter out all channels
+                    return true;
                 }
 
-                // Apply large group filtering (same as smart mode)
-                const isGroupForKeywords = chat.megagroup || chat.gigagroup || (chat.participantsCount !== undefined);
-                if (isGroupForKeywords && chat.participantsCount > 100) {
-                    // For now, filter out - mentions will be checked later in main logic
-                    // Don't return true here, let it be checked for mentions later
-                }
-
-                // Check for spam patterns (same as smart mode)
-                if (this.isSpamMessage('')) { // We'll check title for spam patterns
-                    const title = (chat.title || '').toLowerCase();
-                    const spamKeywords = [
-                        'signal', 'pump', 'moon', 'gem', 'entry', 'target', 'profit',
-                        'guaranteed', '100x', 'lambo', 'hodl', 'buy now', 'free money'
-                    ];
-                    if (spamKeywords.some(keyword => title.includes(keyword))) {
-                        return true; // Filter out spam-titled chats
-                    }
-                }
-
-                // Then check excluded keywords
                 if (EXCLUDED_KEYWORDS.length > 0) {
                     const chatTitle = (chat.title || '').toLowerCase();
                     const hasExcludedKeyword = EXCLUDED_KEYWORDS.some(keyword =>
@@ -251,50 +379,35 @@ class TelegramLoggerSystem {
                     );
 
                     if (hasExcludedKeyword) {
-                        return true; // Filter out this chat
+                        return true;
                     }
                 }
 
                 return false;
 
             case 'super_strict':
-                // NEW: Super strict mode - only DMs and mentions in groups
-                // Block ALL channels
                 if (chat.broadcast) {
-                    return true; // Filter out all channels
+                    return true;
                 }
-
-                // Block ALL groups (we'll check mentions later in main logic)
-                const isGroupInFilter = chat.megagroup || chat.gigagroup || (chat.participantsCount !== undefined);
-                if (isGroupInFilter) {
-                    return false; // Don't filter here, let mentions be checked in main logic
-                }
-
-                return false; // Allow DMs through
+                return false;
 
             case 'no_channels':
-                // NEW: Block ALL channels, only allow groups and DMs
                 if (chat.broadcast) {
-                    return true; // Filter out all channels
+                    return true;
                 }
                 return false;
 
             case 'smart':
             default:
-                // Use the original smart filtering logic
                 return this.shouldFilterChatSmart(chat, sender);
         }
     }
 
-    // Original smart filtering logic moved to separate method
     shouldFilterChatSmart(chat, sender) {
-        // AGGRESSIVE: Skip ALL channels (broadcast only) unless it's a very small one you might care about
         if (chat.broadcast) {
-            // Only allow very small channels (< 1000 members) that might be personal
             if (chat.participantsCount && chat.participantsCount > 1000) {
-                return true; // Filter out large channels
+                return true;
             }
-            // For smaller channels, still filter if they look like crypto/spam
             const title = (chat.title || '').toLowerCase();
             const spamChannelKeywords = [
                 'trading', 'crypto', 'bitcoin', 'pump', 'signal', 'trend', 'coin',
@@ -303,32 +416,22 @@ class TelegramLoggerSystem {
             ];
 
             if (spamChannelKeywords.some(keyword => title.includes(keyword))) {
-                return true; // Filter out channels with spam keywords
+                return true;
             }
         }
 
-        // Skip bots (unless it's a DM with a bot you care about)
         if (sender.bot) {
             const isGroupForSmart = chat.megagroup || chat.gigagroup || (chat.participantsCount !== undefined);
-            if (isGroupForSmart) return true; // Skip all bot messages in groups
-            // DM with bots are allowed through
+            if (isGroupForSmart) return true;
         }
 
-        // Skip large groups (>100 members) unless you're mentioned
-        const isGroupForSmartFilter = chat.megagroup || chat.gigagroup || (chat.participantsCount !== undefined);
-        if (isGroupForSmartFilter && chat.participantsCount > 100) {
-            // This will be checked later for mentions
-            return false; // Don't filter here, check mentions later
-        }
-
-        return false; // Don't filter
+        return false;
     }
 
     async logMessage(messageData) {
         try {
             await this.ensureLogDir();
 
-            // Read existing log
             let logData = [];
             try {
                 const existingData = await fs.readFile(this.currentLogFile, 'utf8');
@@ -337,10 +440,7 @@ class TelegramLoggerSystem {
                 // File doesn't exist yet
             }
 
-            // Add new message
             logData.push(messageData);
-
-            // Write back to file
             await fs.writeFile(this.currentLogFile, JSON.stringify(logData, null, 2));
 
         } catch (error) {
@@ -378,11 +478,12 @@ class TelegramLoggerSystem {
         this.isRunning = true;
         let messageCount = 0;
         let filteredCount = 0;
+        let skippedCount = 0;
         let hourlyCount = 0;
         let hourlyFiltered = 0;
+        let hourlySkipped = 0;
         let lastHourlyReport = new Date();
 
-        // Listen for new messages
         this.client.addEventHandler(async (event) => {
             try {
                 const message = event.message;
@@ -390,20 +491,63 @@ class TelegramLoggerSystem {
                 // Skip if no text content
                 if (!message.text) return;
 
-                // Get chat and sender info with error handling
-                const chat = await message.getChat();
+                // FIXED: Early message filtering to prevent processing unwanted messages
+                if (this.shouldSkipMessage(message)) {
+                    filteredCount++;
+                    hourlyFiltered++;
+                    return;
+                }
+
+                // Message deduplication
+                const messageKey = `${message.chatId || message.peerId?.channelId || message.peerId?.chatId || message.peerId?.userId}_${message.id}`;
+                if (!this.processedMessages) {
+                    this.processedMessages = new Set();
+                }
+
+                if (this.processedMessages.has(messageKey)) {
+                    return;
+                }
+
+                if (this.processedMessages.size > 1000) {
+                    const oldMessages = Array.from(this.processedMessages).slice(0, 500);
+                    oldMessages.forEach(id => this.processedMessages.delete(id));
+                }
+
+                // Rate limiting
+                if (this.lastProcessTime && Date.now() - this.lastProcessTime < 100) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                this.lastProcessTime = Date.now();
+
+                // Get chat info
+                const chat = await this.getChatInfo(message);
                 if (!chat) {
-                    console.log('⚠️  Chat info not available yet, skipping message...');
+                    skippedCount++;
+                    hourlySkipped++;
+                    console.log('⚠️  Chat info not available, skipping message...');
                     return;
                 }
 
-                const sender = await message.getSender();
+                // Get sender info (now handles channels properly)
+                const sender = await this.getSenderInfo(message);
                 if (!sender) {
-                    console.log('⚠️  Sender info not available yet, skipping message...');
+                    skippedCount++;
+                    hourlySkipped++;
+                    console.log('⚠️  Sender info not available, skipping message...');
                     return;
                 }
 
-                // NEW: Apply filtering based on current mode
+                this.processedMessages.add(messageKey);
+
+                const me = await this.getMyInfo();
+                if (!me) {
+                    skippedCount++;
+                    hourlySkipped++;
+                    console.log('⚠️  Own user info not available, skipping message...');
+                    return;
+                }
+
+                // Apply filtering
                 const shouldFilter = await this.shouldFilterChat(chat.id, chat, sender);
                 if (shouldFilter) {
                     filteredCount++;
@@ -413,57 +557,44 @@ class TelegramLoggerSystem {
 
                 // Check group filtering based on mode
                 const isGroupChat = chat.megagroup || chat.gigagroup || (chat.participantsCount !== undefined);
-                const me = await this.client.getMe();
 
                 if (FILTER_MODE === 'super_strict') {
-                    // For super_strict mode, block ALL group messages unless mentioned
                     if (isGroupChat) {
                         const isMention = this.checkMention(message.text, me);
                         if (!isMention) {
                             filteredCount++;
                             hourlyFiltered++;
-                            return; // Only log if you're mentioned in ANY group
+                            return;
                         }
                     }
-                } else if (FILTER_MODE === 'smart') {
-                    // For smart mode, still check mentions in large groups
+                } else if (['smart', 'exclude_keywords'].includes(FILTER_MODE)) {
                     if (isGroupChat && chat.participantsCount > 100) {
                         const isMention = this.checkMention(message.text, me);
                         if (!isMention) {
                             filteredCount++;
                             hourlyFiltered++;
-                            return; // Only log if you're mentioned in large groups
-                        }
-                    }
-                } else if (FILTER_MODE === 'exclude_keywords') {
-                    // For exclude_keywords mode, also check large groups
-                    if (isGroupChat && chat.participantsCount > 100) {
-                        const isMention = this.checkMention(message.text, me);
-                        if (!isMention) {
-                            filteredCount++;
-                            hourlyFiltered++;
-                            return; // Only log if you're mentioned in large groups
+                            return;
                         }
                     }
                 }
 
-                // Skip messages with spam indicators (for all modes)
+                // Skip spam messages
                 if (this.isSpamMessage(message.text)) {
                     filteredCount++;
                     hourlyFiltered++;
                     return;
                 }
 
-                // Skip forwarded messages in groups (often spam)
+                // Skip forwarded messages in groups
                 if (isGroupChat && message.fwdFrom) {
                     filteredCount++;
                     hourlyFiltered++;
                     return;
                 }
 
-                const chatType = isGroupChat ? 'group' : 'dm';
-
-                // Get your user ID
+                // Determine chat type
+                const chatType = sender.isChannel ? 'channel' :
+                                isGroupChat ? 'group' : 'dm';
                 const isFromMe = sender.id.toString() === me.id.toString();
 
                 const messageData = {
@@ -478,31 +609,35 @@ class TelegramLoggerSystem {
                     date: message.date,
                     isFromMe: isFromMe,
                     isMention: this.checkMention(message.text, me),
-                    filterMode: FILTER_MODE // Track which filter mode was used
+                    filterMode: FILTER_MODE
                 };
 
-                // Log the message
                 await this.logMessage(messageData);
 
                 messageCount++;
                 hourlyCount++;
 
                 // Show brief log entry
-                const chatDisplay = chatType === 'group' ? `[${messageData.chatTitle}]` : messageData.chatTitle;
+                const chatDisplay = chatType === 'group' ? `[${messageData.chatTitle}]` :
+                                  chatType === 'channel' ? `📢[${messageData.chatTitle}]` :
+                                  messageData.chatTitle;
                 console.log(`📝 ${new Date().toLocaleTimeString()} - ${chatDisplay} ${messageData.senderName}: ${message.text.substring(0, 60)}...`);
 
                 // Hourly summary
                 const now = new Date();
-                if (now - lastHourlyReport >= 60 * 60 * 1000) { // 1 hour
+                if (now - lastHourlyReport >= 60 * 60 * 1000) {
                     console.log(`\n⏰ === HOURLY SUMMARY ===`);
                     console.log(`📊 Messages logged: ${hourlyCount}`);
                     console.log(`🚫 Messages filtered: ${hourlyFiltered}`);
+                    console.log(`⚠️  Messages skipped: ${hourlySkipped}`);
                     console.log(`📊 Total logged today: ${messageCount}`);
                     console.log(`🚫 Total filtered today: ${filteredCount}`);
+                    console.log(`⚠️  Total skipped today: ${skippedCount}`);
                     console.log(`🕐 ${now.toLocaleString()}\n`);
 
                     hourlyCount = 0;
                     hourlyFiltered = 0;
+                    hourlySkipped = 0;
                     lastHourlyReport = now;
                 }
 
@@ -513,10 +648,13 @@ class TelegramLoggerSystem {
                     console.log(`📅 New day - switching to: ${this.currentLogFile}`);
                     messageCount = 0;
                     filteredCount = 0;
+                    skippedCount = 0;
                 }
 
             } catch (error) {
                 console.error('Error processing message:', error);
+                skippedCount++;
+                hourlySkipped++;
             }
         }, new NewMessage({}));
 
@@ -525,24 +663,14 @@ class TelegramLoggerSystem {
 
     isSpamMessage(text) {
         const spamKeywords = [
-            // Crypto spam
             '🚀', '💎', 'TO THE MOON', 'HODL', 'BUY NOW', 'PUMP', 'LAMBO',
-            // Trading signals
             'SIGNAL', 'ENTRY', 'TARGET', 'STOP LOSS', 'TP:', 'SL:',
-            // Generic spam
             'CLICK HERE', 'FREE MONEY', 'GUARANTEED', '100X', 'PROFIT',
-            // Excessive emojis (3+ in a row)
         ];
 
         const upperText = text.toUpperCase();
-
-        // Check for spam keywords
         const hasSpamKeywords = spamKeywords.some(keyword => upperText.includes(keyword));
-
-        // Check for excessive emojis (more than 5 emojis total)
         const emojiCount = (text.match(/[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu) || []).length;
-
-        // Check for excessive caps (more than 50% uppercase)
         const capsCount = (text.match(/[A-Z]/g) || []).length;
         const capsRatio = capsCount / text.length;
 
@@ -558,15 +686,12 @@ class TelegramLoggerSystem {
                text.toLowerCase().includes(myName.toLowerCase());
     }
 
-    // NEW: Helper command to list chat IDs and folders
     async listChats() {
         console.log('📋 Getting your chats and folders...\n');
 
         try {
-            // Get all dialogs
             const dialogs = await this.client.getDialogs({ limit: 100 });
 
-            // Get folders
             let folderMap = new Map();
             try {
                 const folders = await this.client.invoke('messages.getDialogFilters', {});
@@ -610,7 +735,6 @@ class TelegramLoggerSystem {
                 groupedChats[folderName].push(chatInfo);
             });
 
-            // Display organized by folders
             Object.entries(groupedChats).forEach(([folderName, chats]) => {
                 if (chats.length > 0) {
                     console.log(`\n📁 ${folderName.toUpperCase()}:`);
@@ -634,20 +758,6 @@ class TelegramLoggerSystem {
             console.log('\n# Allowlist mode (only log specific chats):');
             console.log('FILTER_MODE=allowlist');
             console.log('ALLOWED_CHAT_IDS=123456789,987654321,555666777');
-
-            console.log('\n# Exclude folders mode:');
-            console.log('FILTER_MODE=exclude_folders');
-            console.log('EXCLUDED_FOLDERS=spam,crypto,work');
-
-            console.log('\n# Exclude keywords mode (recommended when folders don\'t work):');
-            console.log('FILTER_MODE=exclude_keywords');
-            console.log('EXCLUDED_KEYWORDS=crypto,binance,pump,trading,trend,solana,bitcoin,ethereum');
-            console.log('BLOCK_ALL_CHANNELS=true  # Optional: also block all channels');
-
-            console.log('\n# Block ALL channels mode (most aggressive):');
-            console.log('FILTER_MODE=no_channels');
-            console.log('# This will only log DMs and group chats, no channels at all');
-
             console.log('\n# Smart mode (original filtering):');
             console.log('FILTER_MODE=smart');
 
@@ -660,7 +770,6 @@ class TelegramLoggerSystem {
         console.log('📊 Generating weekly digest from logs...');
 
         try {
-            // Get all log files from the past week
             const weeklyMessages = await this.collectWeeklyLogs();
 
             if (weeklyMessages.length === 0) {
@@ -670,10 +779,7 @@ class TelegramLoggerSystem {
 
             console.log(`Found ${weeklyMessages.length} messages from the past week`);
 
-            // Generate AI digest
             const digest = await this.generateAIDigest(weeklyMessages);
-
-            // Save digest report
             await this.saveDigestReport(digest, weeklyMessages.length);
 
             console.log('✅ Weekly digest generated successfully!');
@@ -689,7 +795,6 @@ class TelegramLoggerSystem {
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
         try {
-            // Read log files from the past 7 days
             for (let i = 0; i < 7; i++) {
                 const date = new Date();
                 date.setDate(date.getDate() - i);
@@ -712,7 +817,6 @@ class TelegramLoggerSystem {
     }
 
     async generateAIDigest(messages) {
-        // Categorize messages
         const directMessages = messages.filter(msg => msg.chatType === 'dm' && !msg.isFromMe);
         const groupMessages = messages.filter(msg => msg.chatType === 'group');
         const mentions = messages.filter(msg => msg.isMention);
@@ -823,7 +927,6 @@ async function main() {
     const command = process.argv[2];
     const logger = new TelegramLoggerSystem();
 
-    // Handle graceful shutdown for continuous logging
     process.on('SIGINT', () => {
         console.log('\n🛑 Shutting down...');
         logger.stop();
@@ -831,12 +934,10 @@ async function main() {
     });
 
     if (command === 'digest') {
-        // Generate weekly digest from existing logs
         console.log('📊 Generating weekly digest from logs...');
         await logger.generateWeeklyDigest();
 
     } else if (command === 'logs') {
-        // Show recent log files
         console.log('📁 Recent log files:');
         try {
             const files = await fs.readdir('./logs');
@@ -854,12 +955,10 @@ async function main() {
         }
 
     } else if (command === 'list-chats') {
-        // NEW: List all chats and folders for configuration
         await logger.initialize();
         await logger.listChats();
 
     } else {
-        // Default: start continuous logging
         try {
             await logger.start();
         } catch (error) {
@@ -871,7 +970,6 @@ async function main() {
     }
 }
 
-// Run if called directly
 if (require.main === module) {
     main().catch(console.error);
 }
