@@ -121,4 +121,4 @@ node_modules/
 .*.tmp
 
 # Output files
-weekly-digest-*.md
+weekly*.md
