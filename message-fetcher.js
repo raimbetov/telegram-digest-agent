@@ -21,7 +21,7 @@ class MessageFetcher {
         );
         
         console.log(`📋 Found ${dialogs.length} total dialogs`);
-        console.log(`🔍 Filter mode: ${this.filter.filterMode}`);
+        console.log(`🔍 Filtering: Exclude channels and crypto/spam groups`);
         
         const allMessages = [];
         let includedDialogs = 0;

@@ -55,18 +55,15 @@ class TelegramDigestApp {
 
     async listChats() {
         try {
-            console.log('📋 Analyzing your chats and filter settings...\n');
-            
+            console.log('📋 Analyzing your chats...\n');
+
             const { client, me } = await this.connection.connect();
             this.filter = new MessageFilter(me);
-            
-            // Build folder cache if needed
-            await this.filter.buildFolderCache(client);
-            
+
             const dialogs = await client.getDialogs({ limit: 100 });
-            
+
             console.log('='.repeat(80));
-            console.log(`CHAT FILTERING PREVIEW (Mode: ${process.env.FILTER_MODE || 'smart'})`);
+            console.log(`CHAT FILTERING PREVIEW`);
             console.log('='.repeat(80));
 
             let included = 0, excluded = 0;
@@ -122,59 +119,10 @@ class TelegramDigestApp {
 
             console.log('\n' + '='.repeat(80));
             console.log(`SUMMARY: ${included} included, ${excluded} excluded`);
-            console.log(`Filter Mode: ${process.env.FILTER_MODE || 'smart'}`);
-            
-            // Show filter-specific info
-            if (process.env.FILTER_MODE === 'allowlist' && process.env.ALLOWED_CHAT_IDS) {
-                console.log(`Allowed Chat IDs: ${process.env.ALLOWED_CHAT_IDS}`);
-            }
-            if (process.env.EXCLUDE_KEYWORDS) {
-                console.log(`Excluded Keywords: ${process.env.EXCLUDE_KEYWORDS}`);
-            }
-            if (process.env.BLOCK_ALL_CHANNELS === 'true') {
-                console.log(`Block All Channels: ENABLED`);
-            }
+            console.log(`Filters: Excluded all channels and crypto/spam groups`);
 
         } catch (error) {
             console.error('❌ Error listing chats:', error.message);
-        } finally {
-            await this.connection.disconnect();
-        }
-    }
-
-    async testFilters() {
-        try {
-            console.log('🧪 Testing filter configurations...\n');
-            
-            const { client, me } = await this.connection.connect();
-            this.filter = new MessageFilter(me);
-            
-            // Test different filter modes
-            const modes = ['smart', 'dm_only', 'super_strict', 'no_channels'];
-            const dialogs = await client.getDialogs({ limit: 50 });
-            
-            console.log('='.repeat(80));
-            console.log('FILTER MODE COMPARISON');
-            console.log('='.repeat(80));
-            
-            for (const mode of modes) {
-                const originalMode = this.filter.filterMode;
-                this.filter.filterMode = mode;
-                
-                let included = 0;
-                dialogs.forEach(dialog => {
-                    if (this.filter.shouldIncludeDialog(dialog)) included++;
-                });
-                
-                console.log(`📊 ${mode.toUpperCase().padEnd(15)} : ${included}/${dialogs.length} chats included`);
-                
-                this.filter.filterMode = originalMode;
-            }
-            
-            console.log('\n💡 Use "FILTER_MODE=<mode>" in your .env to change filtering');
-
-        } catch (error) {
-            console.error('❌ Error testing filters:', error.message);
         } finally {
             await this.connection.disconnect();
         }
@@ -191,27 +139,25 @@ class TelegramDigestApp {
   node main.js                    Generate weekly digest (default)
   node main.js digest             Generate weekly digest
   node main.js list-chats         Show chats and filtering status
-  node main.js test-filters       Compare different filter modes
   node main.js reports            List recent digest reports
+  node main.js help               Show this help message
 
 🔧 ENVIRONMENT VARIABLES:
-  FILTER_MODE          Filter mode: smart, dm_only, super_strict, no_channels, allowlist, exclude_keywords, exclude_folders
-  BLOCK_ALL_CHANNELS   Block all channels: true/false
-  ALLOWED_CHAT_IDS     Comma-separated chat IDs (for allowlist mode)
-  EXCLUDED_KEYWORDS    Comma-separated keywords to exclude from chat titles
-  EXCLUDED_FOLDERS     Comma-separated folder names to exclude
-  INCLUDE_ARCHIVED     Include archived chats: true/false
+  INCLUDE_ARCHIVED     Include archived chats: true/false (default: false)
   DEBUG_FILTERING      Show detailed filtering debug info: true/false
   DEBUG_FETCHING       Show detailed message fetching debug info: true/false
 
-💡 FILTER MODES:
-  smart         Intelligent filtering (excludes spam, large channels, etc.)
-  dm_only       Only direct messages (no groups/channels)
-  super_strict  Only DMs and small groups (<50 members) with mentions
-  no_channels   Exclude all channels, include DMs and groups
-  allowlist     Only specific chat IDs (set ALLOWED_CHAT_IDS)
-  exclude_keywords  Exclude chats with specific keywords in titles
-  exclude_folders   Exclude chats in specific Telegram folders
+📊 FILTERING:
+  The app automatically filters out:
+  ❌ All channels
+  ❌ All bots
+  ❌ Crypto/trading/gambling groups (keyword-based)
+  ❌ Spam messages (excessive emojis, pump signals, etc.)
+
+  Includes:
+  ✅ All direct messages (DMs)
+  ✅ Clean group conversations
+  ✅ Messages from the last 7 days only
         `);
     }
 }
@@ -240,11 +186,7 @@ async function main() {
             case 'list-chats':
                 await app.listChats();
                 break;
-                
-            case 'test-filters':
-                await app.testFilters();
-                break;
-                
+
             case 'reports':
                 await app.showReports();
                 break;
