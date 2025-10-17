@@ -88,22 +88,22 @@ class ReportGenerator {
 
     buildPrompt(analysis) {
         const { directMessages, groupMessages, channelMessages, mentions, myMessages, stats, topChats } = analysis;
-        
+
         return `
 Analyze this week's Telegram activity and create a professional weekly digest:
 
 DIRECT MESSAGES RECEIVED (${directMessages.length} messages):
-${directMessages.slice(0, 15).map(msg => 
+${directMessages.map(msg =>
     `- ${msg.senderName}: "${msg.text.substring(0, 100)}..." (${new Date(msg.timestamp).toLocaleDateString()})`
 ).join('\n')}
 
 GROUP ACTIVITY (${groupMessages.length} messages):
-${groupMessages.slice(0, 20).map(msg =>
+${groupMessages.slice(0, 30).map(msg =>
     `- [${msg.chatTitle}] ${msg.senderName}: "${msg.text.substring(0, 100)}..." (${new Date(msg.timestamp).toLocaleDateString()})`
 ).join('\n')}
 
 CHANNEL UPDATES (${channelMessages.length} messages):
-${channelMessages.slice(0, 15).map(msg =>
+${channelMessages.slice(0, 20).map(msg =>
     `- [${msg.chatTitle}]: "${msg.text.substring(0, 100)}..." (${new Date(msg.timestamp).toLocaleDateString()})`
 ).join('\n')}
 
@@ -113,7 +113,7 @@ ${mentions.map(msg =>
 ).join('\n')}
 
 MY ACTIVITY (${myMessages.length} messages sent):
-${myMessages.slice(0, 10).map(msg =>
+${myMessages.slice(0, 20).map(msg =>
     `- [${msg.chatTitle}]: "${msg.text.substring(0, 100)}..." (${new Date(msg.timestamp).toLocaleDateString()})`
 ).join('\n')}
 
