@@ -1,3 +1,5 @@
+const ChatUtils = require('./chat-utils');
+
 class MessageFilter {
     constructor(me) {
         this.me = me;
@@ -52,12 +54,9 @@ class MessageFilter {
         const entity = dialog.entity;
         const chatId = entity.id.toString();
 
-        // Determine chat types
-        const isChannel = entity.broadcast || entity.className === 'Channel';
-        const isGroup = entity.megagroup || entity.gigagroup || 
-                       (entity.participantsCount !== undefined && !isChannel);
-        const isBot = entity.bot;
-        const isDM = !isChannel && !isGroup && !isBot;
+        // Determine chat types using utility
+        const chatTypeInfo = ChatUtils.getChatType(entity);
+        const { isChannel, isGroup, isBot, isDM } = chatTypeInfo;
 
         // Debug logging
         if (process.env.DEBUG_FILTERING === 'true') {

@@ -1,3 +1,5 @@
+const ChatUtils = require('./chat-utils');
+
 class MessageFetcher {
     constructor(client, filter, connection) {
         this.client = client;
@@ -29,7 +31,7 @@ class MessageFetcher {
             
             includedDialogs++;
             const entity = dialog.entity;
-            const chatTitle = entity.title || `${entity.firstName || ''} ${entity.lastName || ''}`.trim() || 'Unknown';
+            const chatTitle = ChatUtils.getChatTitle(entity);
             
             try {
                 const messages = await this.fetchDialogMessages(entity, weekAgo, chatTitle);
@@ -66,8 +68,9 @@ class MessageFetcher {
             // Check date range
             const messageDate = new Date(message.date * 1000);
             if (messageDate < weekAgo) {
-                // Since messages are sorted by date (newest first), we can break here
-                break;
+                // Messages are typically sorted newest first, but we'll continue
+                // checking all messages to ensure we don't miss any
+                continue;
             }
             weeklyCount++;
 
@@ -116,10 +119,7 @@ class MessageFetcher {
     }
 
     getChatType(entity) {
-        const isChannel = entity.broadcast || entity.className === 'Channel';
-        const isGroup = entity.megagroup || entity.gigagroup || 
-                       (entity.participantsCount !== undefined && !isChannel);
-        return isChannel ? 'channel' : isGroup ? 'group' : 'dm';
+        return ChatUtils.getChatType(entity).type;
     }
 
     async fetchArchivedMessages() {
@@ -143,7 +143,7 @@ class MessageFetcher {
                 
                 includedDialogs++;
                 const entity = dialog.entity;
-                const chatTitle = entity.title || `${entity.firstName || ''} ${entity.lastName || ''}`.trim() || 'Archived Chat';
+                const chatTitle = ChatUtils.getChatTitle(entity, 'Archived Chat');
                 
                 try {
                     const messages = await this.fetchDialogMessages(entity, weekAgo, `[ARCHIVED] ${chatTitle}`);

@@ -2,6 +2,7 @@ const TelegramConnection = require('./telegram-client');
 const MessageFilter = require('./message-filter');
 const MessageFetcher = require('./message-fetcher');
 const ReportGenerator = require('./report-generator');
+const ChatUtils = require('./chat-utils');
 
 class TelegramDigestApp {
     constructor() {
@@ -74,23 +75,18 @@ class TelegramDigestApp {
             
             dialogs.forEach(dialog => {
                 const entity = dialog.entity;
-                const title = entity.title || `${entity.firstName || ''} ${entity.lastName || ''}`.trim() || 'Unknown';
+                const title = ChatUtils.getChatTitle(entity);
                 const willInclude = this.filter.shouldIncludeDialog(dialog);
-                
-                const type = entity.broadcast ? 'channel' : 
-                           entity.megagroup || entity.gigagroup ? 'supergroup' :
-                           entity.participantsCount !== undefined ? 'group' :
-                           entity.bot ? 'bot' : 'dm';
-                
-                const icon = willInclude ? '✅' : '❌';
-                const typeIcon = type === 'dm' ? '👤' : type === 'bot' ? '🤖' : 
-                               type === 'channel' ? '📢' : '👥';
-                
+
+                const chatTypeInfo = ChatUtils.getChatType(entity);
+                const type = chatTypeInfo.type;
+                const icon = ChatUtils.getChatIcon(type, willInclude);
+
                 const chatInfo = {
                     title,
                     type,
                     members: entity.participantsCount || 'N/A',
-                    icon: `${icon} ${typeIcon}`
+                    icon: icon
                 };
 
                 if (willInclude) {
@@ -228,7 +224,9 @@ async function main() {
     // Handle Ctrl+C gracefully
     process.on('SIGINT', async () => {
         console.log('\n🛑 Shutting down gracefully...');
-        await app.connection.disconnect();
+        if (app.connection && app.connection.isConnected) {
+            await app.connection.disconnect();
+        }
         process.exit(0);
     });
 

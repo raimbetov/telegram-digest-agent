@@ -1,12 +1,16 @@
 {
   "name": "telegram-digest-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Automated weekly digest generator for Telegram messages using AI analysis",
+  "main": "main.js",
   "scripts": {
+    "start": "node main.js",
+    "list": "node main.js list-chats",
+    "test-filters": "node main.js test-filters",
+    "reports": "node main.js reports",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["telegram", "digest", "ai", "deepseek"],
   "author": "",
   "license": "ISC",
   "dependencies": {

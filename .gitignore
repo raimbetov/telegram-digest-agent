@@ -122,3 +122,4 @@ node_modules/
 
 # Output files
 weekly*.md
+weekly*.json
