@@ -10,16 +10,28 @@ class ChatUtils {
      * @returns {Object} Chat type information
      */
     static getChatType(entity) {
-        const isChannel = entity.broadcast || entity.className === 'Channel';
-        const isBot = entity.bot;
-        const isGroup = entity.megagroup || entity.gigagroup ||
-                       (entity.participantsCount !== undefined && !isChannel);
-        const isDM = !isChannel && !isGroup && !isBot;
+        // Check for User entities (DMs) - more robust detection
+        const isUser = entity.className === 'User';
+        const isBot = entity.bot === true;
+
+        // Channel detection
+        const isChannel = entity.broadcast === true ||
+                         (entity.className === 'Channel' && !entity.megagroup && !entity.gigagroup);
+
+        // Group detection (including megagroups and gigagroups)
+        const isGroup = entity.megagroup === true ||
+                       entity.gigagroup === true ||
+                       (entity.className === 'Channel' && (entity.megagroup || entity.gigagroup)) ||
+                       (entity.participantsCount !== undefined && !isChannel && !isUser);
+
+        // DM detection - must be a User, not a bot, not a channel, not a group
+        const isDM = (isUser && !isBot) || (!isChannel && !isGroup && !isBot && !isUser);
 
         let typeString = 'dm';
         if (isChannel) typeString = 'channel';
         else if (isGroup) typeString = 'group';
         else if (isBot) typeString = 'bot';
+        else if (isDM || isUser) typeString = 'dm';
 
         return {
             type: typeString,
