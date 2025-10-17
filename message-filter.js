@@ -70,13 +70,16 @@ class MessageFilter {
                     return true;
                 }
                 return this.allowedChatIds.includes(chatId);
-                
+
             case 'dm_only':
                 return isDM && !isBot;
-                
+
             case 'no_channels':
-                return !isChannel;
-                
+                // Exclude channels, but also filter spam groups
+                if (isChannel) return false;
+                if (isGroup && this.isSpamChat(entity)) return false;
+                return true;
+
             case 'super_strict':
                 return isDM || (isGroup && entity.participantsCount && entity.participantsCount <= 50);
                 
@@ -99,6 +102,27 @@ class MessageFilter {
         }
     }
 
+    isSpamChat(entity) {
+        const title = (entity.title || '').toLowerCase();
+        const spamKeywords = [
+            // Trading & Crypto
+            'trading', 'crypto', 'bitcoin', 'btc', 'eth', 'pump', 'signal', 'trend',
+            'coin', 'binance', 'solana', 'ethereum', 'token', 'defi', 'nft',
+            'doge', 'shib', 'altcoin', 'protocol', 'dao', 'web3', 'blockchain',
+            'airdrop', 'presale', 'launch', 'listing', 'dex', 'swap',
+            'xrp', 'ripple', 'cardano', 'ada', 'matic', 'polygon', 'bnb',
+            'usdt', 'usdc', 'stablecoin', 'luna', 'avax', 'dot', 'link',
+            'uni', 'sushi', 'cake', 'farm', 'yield', 'stake', 'mining',
+            'hodl', 'fomo', 'ath', 'desci', 'seedify', 'ido', 'ico',
+            'pink', 'karma', 'cult', 'nerd', 'labs', 'origo',
+            // Gambling
+            'casino', 'betting', 'win', 'lottery', 'prize', 'jackpot',
+            // Memes & Spam
+            'meme', 'trending', 'moonshot', 'gem'
+        ];
+        return spamKeywords.some(keyword => title.includes(keyword));
+    }
+
     smartFilter(entity, isChannel, isGroup, isBot, isDM) {
         // Always include DMs (non-bots)
         if (isDM && !isBot) return true;
@@ -109,15 +133,9 @@ class MessageFilter {
         // Filter large channels (>1000 members)
         if (isChannel && entity.participantsCount && entity.participantsCount > 1000) return false;
 
-        // Filter spam channels
-        if (isChannel) {
-            const title = (entity.title || '').toLowerCase();
-            const spamKeywords = [
-                'trading', 'crypto', 'bitcoin', 'pump', 'signal', 'trend', 'coin',
-                'binance', 'solana', 'ethereum', 'token', 'defi', 'nft', 'meme',
-                'casino', 'betting', 'win', 'lottery', 'prize'
-            ];
-            if (spamKeywords.some(keyword => title.includes(keyword))) return false;
+        // Filter spam channels AND groups by keywords
+        if ((isChannel || isGroup) && this.isSpamChat(entity)) {
+            return false;
         }
 
         // Include small-medium groups (up to 500 members)
